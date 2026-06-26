@@ -339,6 +339,41 @@ function drawFlying() {
   ctx.fillStyle = landGrad;
   ctx.fillRect(0, canvas.height - earthH, canvas.width, earthH);
 
+  // Indian men on the ground waving goodbye — shrink + fade as you fly away
+  const groundY = canvas.height - earthH;
+  const figScale = earthH / (canvas.height * 0.45);
+  const figAlpha = Math.clamp(1 - t * 3.5, 0, 1); // fade by ~t=0.28
+  if (figAlpha > 0 && figScale > 0.05) {
+    ctx.globalAlpha = figAlpha;
+    const GROUND_FOLK = [
+      { x: 140, dir:  1, k: '#ff9800', tu: '#ffffff' },
+      { x: 300, dir: -1, k: '#e91e63', tu: '#ffd700' },
+      { x: 500, dir:  1, k: '#4caf50', tu: '#ffffff' },
+      { x: 680, dir: -1, k: '#9c27b0', tu: '#ffd700' },
+      { x: 820, dir:  1, k: '#f44336', tu: '#ffffff' },
+    ];
+    GROUND_FOLK.forEach(p => {
+      ctx.save();
+      ctx.translate(p.x, groundY);
+      ctx.scale(figScale, figScale);
+      // draw man with feet at (0,0) in scaled space
+      drawIndianMan(-18, -54, p.dir, p.k, p.tu);
+      // waving arm above head
+      const waveAngle = Math.sin(blinkTimer * 0.006 + p.x) * 0.5 - 0.8;
+      ctx.save();
+      ctx.translate(p.dir > 0 ? 14 : -14, -66);
+      ctx.rotate(waveAngle);
+      ctx.strokeStyle = p.k; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -18); ctx.stroke();
+      // hand circle
+      ctx.fillStyle = '#c68642';
+      ctx.beginPath(); ctx.arc(0, -22, 5, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+      ctx.restore();
+    });
+    ctx.globalAlpha = 1;
+  }
+
   // Birds to dodge
   birds.forEach(b => drawBird(b.x, b.y, b.flap));
 
