@@ -3,791 +3,394 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Badewannen-Flug nach Indien</title>
+  <title>Der blonde Lehrer</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: 'Segoe UI', sans-serif; }
-    canvas { border: 3px solid #e94560; border-radius: 8px; display: block; }
-    #ui { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); color: white; font-size: 18px; text-align: center; pointer-events: none; }
-    #hint { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); color: #ffd700; font-size: 16px; background: rgba(0,0,0,0.6); padding: 8px 16px; border-radius: 20px; pointer-events: none; }
+    body { background: #1a1a2e; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; font-family: 'Segoe UI', sans-serif; }
+    #wrap { position: relative; }
+    canvas { border: 3px solid #e94560; border-radius: 8px; display: block; background:#000; }
+    #buttons { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 20px; }
+    .btn {
+      background: #e94560; color: white; border: none; padding: 12px 32px;
+      font-size: 20px; font-weight: bold; border-radius: 30px; cursor: pointer;
+      box-shadow: 0 4px 0 #a82a40; transition: transform .08s;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #a82a40; }
+    .btn.yes { background:#27ae60; box-shadow:0 4px 0 #1c7a44; }
+    .btn.no  { background:#c0392b; box-shadow:0 4px 0 #8a281d; }
+    #hint { color:#ffd700; margin-top:14px; font-size:15px; }
   </style>
 </head>
 <body>
-<canvas id="game" width="900" height="550"></canvas>
-<div id="hint"></div>
+<div id="wrap">
+  <canvas id="game" width="900" height="550"></canvas>
+  <div id="buttons"></div>
+</div>
+<div id="hint">Klicke / Leertaste = weiter</div>
 
 <script>
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+const btnBox = document.getElementById('buttons');
 const hint = document.getElementById('hint');
 
-// ── STATE MACHINE ──────────────────────────────────────────
-// 'start' → 'home' → 'flying' → 'india' → 'start'
-let state = 'start';
+let t = 0;          // global animation time
+let teacherMood = 'happy';  // happy | asking | nervous | panic | relief
+let shake = 0;
 
-// ── PLAYER ─────────────────────────────────────────────────
-const player = {
-  x: 200, y: 370, w: 36, h: 54,
-  vx: 0, vy: 0,
-  onGround: true, dir: 1,
-  frame: 0, frameTimer: 0
-};
-
-// ── WORLD ──────────────────────────────────────────────────
-const GROUND = 430;
-
-// Bathtub
-const tub = { x: 340, y: 390, w: 90, h: 50 };
-
-// Button (on the tub)
-const btn = { x: tub.x + 30, y: tub.y - 14, w: 30, h: 14, pressed: false };
-
-// ── FLYING (player-controlled, ~60 seconds) ────────────────
-let flyProgress = 0;            // 0 → 1
-let flyTubX = 0, flyTubY = 0;   // tub position (player steers)
-let flyTubVX = 0, flyTubVY = 0; // velocity
-let flightTime = 0;             // ms elapsed in flight
-const FLIGHT_DURATION = 60000;  // 60 seconds to reach India
-let birds = [];                 // obstacles to dodge
-let birdTimer = 0;
-let bumpShake = 0;              // visual feedback when hitting a bird
-
-// ── CLOUDS ─────────────────────────────────────────────────
-const clouds = [
-  { x: 60,  y: 60,  w: 120, s: 0.3 },
-  { x: 300, y: 40,  w: 90,  s: 0.2 },
-  { x: 600, y: 80,  w: 150, s: 0.4 },
-  { x: 750, y: 30,  w: 100, s: 0.25 }
+// ── DIALOG SCRIPT ──────────────────────────────────────────
+// type: 'say' (someone talks) or 'choice' (player picks)
+const SCRIPT = [
+  { who: 'Lehrer Herr Blondi', text: 'Guten Morgen Klasse! Heute lernen wir Mathe. 2 + 2 = ... ?', mood: 'happy' },
+  { who: 'Die Klasse',         text: 'Vier!', mood: 'happy' },
+  { who: 'Lehrer Herr Blondi', text: 'Sehr gut! Ihr seid heute richtig schlau.', mood: 'happy' },
+  { who: 'Lehrer Herr Blondi', text: 'Ähm... Kinder, ich geh mal kurz auf Klo, ja?', mood: 'asking' },
+  { who: '', text: '', mood: 'asking', choice: true },   // player chooses
+  // branch handled in code
 ];
 
-// ── STARS (India scene) ────────────────────────────────────
-const stars = Array.from({ length: 80 }, () => ({
-  x: Math.random() * 900, y: Math.random() * 200,
-  r: Math.random() * 1.5 + 0.5
-}));
+let idx = 0;
+let phase = 'intro';   // intro -> choice -> ending
+let ending = null;     // 'classroom' | 'allowed'
+let endLines = [];
+let endIdx = 0;
 
-// ── KEYS ───────────────────────────────────────────────────
-const keys = {};
+const current = () => SCRIPT[idx];
+
+// ── INPUT ──────────────────────────────────────────────────
+function advance() {
+  if (phase === 'choice') return;        // must use the buttons
+  if (phase === 'ending') {
+    endIdx++;
+    if (endIdx >= endLines.length) { restart(); return; }
+    teacherMood = endLines[endIdx].mood;
+    if (endLines[endIdx].mood === 'panic') shake = 16;
+    return;
+  }
+  // intro lines
+  idx++;
+  if (idx >= SCRIPT.length) return;
+  const c = current();
+  teacherMood = c.mood;
+  if (c.choice) { phase = 'choice'; showChoiceButtons(); }
+}
+
+canvas.addEventListener('click', advance);
 document.addEventListener('keydown', e => {
-  keys[e.key] = true;
-  if (e.key === 'Enter' && state === 'start') startGame();
-  if (e.key === 'Enter' && state === 'india') resetGame();
-  if ((e.key === 'e' || e.key === 'E') && state === 'home') tryPress();
-  if (e.key === ' ') e.preventDefault();
+  if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); advance(); }
 });
-document.addEventListener('keyup', e => { keys[e.key] = false; });
 
-function nearTub() {
-  return Math.abs(player.x - (tub.x + tub.w / 2)) < 70 && player.y + player.h > tub.y;
+function showChoiceButtons() {
+  btnBox.innerHTML = '';
+  const yes = document.createElement('button');
+  yes.className = 'btn yes'; yes.textContent = 'Ja, geh ruhig 🚽';
+  yes.onclick = () => chooseYes();
+  const no = document.createElement('button');
+  no.className = 'btn no'; no.textContent = 'NEIN! ✋';
+  no.onclick = () => chooseNo();
+  btnBox.appendChild(no);
+  btnBox.appendChild(yes);
+  hint.textContent = 'Darf der Lehrer aufs Klo? Entscheide!';
 }
 
-function tryPress() {
-  if (nearTub()) {
-    btn.pressed = true;
-    setTimeout(() => launchFlight(), 500);
-  }
+function clearButtons() { btnBox.innerHTML = ''; hint.textContent = 'Klicke / Leertaste = weiter'; }
+
+// ── ENDINGS ────────────────────────────────────────────────
+function chooseYes() {
+  clearButtons();
+  ending = 'allowed';
+  phase = 'ending';
+  endLines = [
+    { who: 'Die Klasse', text: 'Ja, gehen Sie ruhig!', mood: 'happy' },
+    { who: 'Lehrer Herr Blondi', text: 'Puh, danke! Bin gleich wieder da. 🏃', mood: 'relief' },
+    { who: '', text: 'ENDE — Der Lehrer ist gerettet! Klick für nochmal.', mood: 'relief' },
+  ];
+  endIdx = 0;
+  teacherMood = 'relief';
 }
 
-function startGame() {
-  state = 'home';
-  player.x = 100; player.y = GROUND - player.h;
-  player.vx = 0; player.vy = 0; player.onGround = true;
-  btn.pressed = false; flyProgress = 0;
+function chooseNo() {
+  clearButtons();
+  ending = 'classroom';
+  phase = 'ending';
+  endLines = [
+    { who: 'Die Klasse', text: 'NEIN! Sie bleiben hier!', mood: 'asking' },
+    { who: 'Lehrer Herr Blondi', text: 'Was?! Aber ich muss doch ganz dringend...', mood: 'nervous' },
+    { who: 'Die Klasse', text: 'NEIN heißt NEIN, Herr Blondi!', mood: 'nervous' },
+    { who: 'Lehrer Herr Blondi', text: 'Okay... dann mach ich eben HIER in den Klassenraum! 😳', mood: 'panic' },
+    { who: 'Lehrer Herr Blondi', text: '...und dann kackt er mitten in den Klassenraum! 💩', mood: 'panic' },
+    { who: 'Die Klasse', text: 'IIIIH! NEEEIN! Das stinkt ja! 🤢', mood: 'panic' },
+    { who: '', text: 'ENDE — Das hättet ihr ihn mal aufs Klo gehen lassen sollen! Klick für nochmal.', mood: 'panic' },
+  ];
+  endIdx = 0;
+  teacherMood = 'asking';
 }
 
-function launchFlight() {
-  state = 'flying';
-  flyTubX = 200;
-  flyTubY = 300;
-  flyTubVX = 0; flyTubVY = 0;
-  flyProgress = 0;
-  flightTime = 0;
-  birds = [];
-  birdTimer = 0;
-  bumpShake = 0;
-}
-
-function resetGame() {
-  state = 'start';
-}
-
-// ── UPDATE ─────────────────────────────────────────────────
-function update(dt) {
-  if (state === 'home') updateHome(dt);
-  if (state === 'flying') updateFlying(dt);
-
-  // clouds drift
-  clouds.forEach(c => { c.x -= c.s; if (c.x + c.w < 0) c.x = 920; });
-}
-
-function updateHome(dt) {
-  // move
-  if (keys['ArrowLeft'] || keys['a'] || keys['A']) { player.vx = -3; player.dir = -1; }
-  else if (keys['ArrowRight'] || keys['d'] || keys['D']) { player.vx = 3; player.dir = 1; }
-  else player.vx = 0;
-
-  // jump
-  if ((keys['ArrowUp'] || keys['w'] || keys['W'] || keys[' ']) && player.onGround) {
-    player.vy = -12;
-    player.onGround = false;
-  }
-
-  player.vy += 0.5;
-  player.x += player.vx;
-  player.y += player.vy;
-
-  if (player.y + player.h >= GROUND) {
-    player.y = GROUND - player.h;
-    player.vy = 0;
-    player.onGround = true;
-  }
-  player.x = Math.max(0, Math.min(canvas.width - player.w, player.x));
-
-  // animate walk frame
-  if (player.vx !== 0) {
-    player.frameTimer += dt;
-    if (player.frameTimer > 180) { player.frame = (player.frame + 1) % 2; player.frameTimer = 0; }
-  } else player.frame = 0;
-
-  // hint
-  if (nearTub()) hint.textContent = '[E] Knopf drücken';
-  else hint.textContent = '← → Laufen  |  ↑ Springen  |  Zur Badewanne gehen';
-}
-
-function updateFlying(dt) {
-  // Count flight time toward the ~60 second goal
-  flightTime += dt;
-  flyProgress = Math.clamp(flightTime / FLIGHT_DURATION, 0, 1);
-  if (flyProgress >= 1) { state = 'india'; hint.textContent = ''; return; }
-
-  // Player steers the tub with arrow keys / WASD
-  const acc = 0.35;
-  if (keys['ArrowLeft']  || keys['a'] || keys['A']) flyTubVX -= acc;
-  if (keys['ArrowRight'] || keys['d'] || keys['D']) flyTubVX += acc;
-  if (keys['ArrowUp']    || keys['w'] || keys['W'] || keys[' ']) flyTubVY -= acc;
-  if (keys['ArrowDown']  || keys['s'] || keys['S']) flyTubVY += acc;
-
-  // Gentle drag so it feels floaty but controllable
-  flyTubVX *= 0.94;
-  flyTubVY *= 0.94;
-  flyTubX += flyTubVX;
-  flyTubY += flyTubVY;
-
-  // Keep the tub on screen
-  flyTubX = Math.clamp(flyTubX, 60, canvas.width - 60);
-  flyTubY = Math.clamp(flyTubY, 60, canvas.height - 80);
-
-  // Spawn birds to dodge (fly in from the right)
-  birdTimer += dt;
-  if (birdTimer > 1100) {
-    birdTimer = 0;
-    birds.push({
-      x: canvas.width + 30,
-      y: 80 + Math.random() * (canvas.height - 200),
-      speed: 2 + Math.random() * 2.5,
-      flap: 0
-    });
-  }
-  for (const b of birds) {
-    b.x -= b.speed;
-    b.flap += dt * 0.01;
-  }
-  birds = birds.filter(b => b.x > -40);
-
-  // Collision with birds → gentle bump (kid-friendly, no game over)
-  for (const b of birds) {
-    if (Math.abs(b.x - flyTubX) < 45 && Math.abs(b.y - flyTubY) < 40 && !b.hit) {
-      b.hit = true;
-      bumpShake = 12;
-      flyTubVX -= 3; // pushed back a little
-    }
-  }
-  if (bumpShake > 0) bumpShake -= dt * 0.05;
+function restart() {
+  idx = 0; phase = 'intro'; ending = null; endLines = []; endIdx = 0;
+  teacherMood = 'happy'; shake = 0;
+  clearButtons();
 }
 
 // ── DRAW ───────────────────────────────────────────────────
 function draw() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  if (state === 'start') drawStart();
-  else if (state === 'home') drawHome();
-  else if (state === 'flying') drawFlying();
-  else if (state === 'india') drawIndia();
-}
-
-function drawStart() {
-  // Sky
-  const sky = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  sky.addColorStop(0, '#0f3460'); sky.addColorStop(1, '#16213e');
-  ctx.fillStyle = sky; ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  // Stars
-  ctx.fillStyle = 'white';
-  stars.forEach(s => { ctx.beginPath(); ctx.arc(s.x, s.y + 100, s.r, 0, Math.PI*2); ctx.fill(); });
-
-  // Title
   ctx.save();
-  ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 20;
-  ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 52px Segoe UI';
-  ctx.textAlign = 'center';
-  ctx.fillText('🛁 Nach Indien!', 450, 180);
+  if (shake > 0) { ctx.translate((Math.random()-0.5)*shake, (Math.random()-0.5)*shake); shake -= 0.5; }
+
+  drawClassroom();
+  drawStudents();
+  drawTeacher(220, 250, teacherMood);
+
+  // floor puddle in the bad ending
+  if (ending === 'classroom' && endIdx >= 3) {
+    drawPuddle(220, 470);
+  }
+  // ...and then he poops — a poop pile appears
+  if (ending === 'classroom' && endIdx >= 4) {
+    drawPoop(235, 478);
+    // stink lines
+    ctx.strokeStyle = 'rgba(120,180,80,0.6)'; ctx.lineWidth = 2;
+    for (let i = 0; i < 3; i++) {
+      const sx = 215 + i * 20;
+      ctx.beginPath();
+      ctx.moveTo(sx, 455);
+      ctx.quadraticCurveTo(sx + 6, 445 + Math.sin(t*0.01+i)*3, sx, 435);
+      ctx.quadraticCurveTo(sx - 6, 425 + Math.cos(t*0.01+i)*3, sx, 415);
+      ctx.stroke();
+    }
+  }
+
+  drawDialog();
   ctx.restore();
-
-  ctx.fillStyle = '#e2e2e2';
-  ctx.font = '22px Segoe UI';
-  ctx.textAlign = 'center';
-  ctx.fillText('Du fliegst mit deiner Badewanne nach Indien', 450, 240);
-
-  ctx.fillStyle = '#ffd700';
-  ctx.font = '18px Segoe UI';
-  ctx.fillText('Laufen: ← →   |   Springen: ↑   |   Knopf: E', 450, 295);
-  ctx.fillStyle = '#aee';
-  ctx.font = '16px Segoe UI';
-  ctx.fillText('Im Flug steuerst du die Badewanne selbst (~60 Sek.)!', 450, 325);
-
-  drawBlinkText('[ ENTER ] Spiel starten', 450, 380, '#00d4ff');
 }
 
-let blinkTimer = 0;
-function drawBlinkText(text, x, y, color) {
-  if (Math.floor(blinkTimer / 600) % 2 === 0) {
-    ctx.fillStyle = color;
-    ctx.font = 'bold 24px Segoe UI';
-    ctx.textAlign = 'center';
-    ctx.fillText(text, x, y);
-  }
-}
+function drawClassroom() {
+  // Back wall
+  ctx.fillStyle = '#e8e2d0'; ctx.fillRect(0, 0, canvas.width, 410);
+  // Floor
+  const fl = ctx.createLinearGradient(0, 410, 0, 550);
+  fl.addColorStop(0, '#b9895c'); fl.addColorStop(1, '#9c6f44');
+  ctx.fillStyle = fl; ctx.fillRect(0, 410, canvas.width, 140);
+  // Floor boards
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 2;
+  for (let i = 1; i < 8; i++) { ctx.beginPath(); ctx.moveTo(i*120, 410); ctx.lineTo(i*120, 550); ctx.stroke(); }
 
-function drawHome() {
-  // Sky gradient
-  const sky = ctx.createLinearGradient(0, 0, 0, GROUND);
-  sky.addColorStop(0, '#87ceeb'); sky.addColorStop(1, '#d4f0ff');
-  ctx.fillStyle = sky; ctx.fillRect(0, 0, canvas.width, GROUND);
+  // Chalkboard
+  ctx.fillStyle = '#2c4a3a'; ctx.fillRect(60, 40, 360, 150);
+  ctx.strokeStyle = '#7a5230'; ctx.lineWidth = 8; ctx.strokeRect(60, 40, 360, 150);
+  ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.font = '26px Comic Sans MS, cursive';
+  ctx.textAlign = 'left';
+  ctx.fillText('2 + 2 = 4', 110, 110);
+  ctx.font = '18px Comic Sans MS, cursive';
+  ctx.fillText('Mathe heute :)', 110, 150);
 
-  // Sun
-  ctx.fillStyle = '#FFD700';
-  ctx.beginPath(); ctx.arc(820, 70, 45, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle = 'rgba(255,215,0,0.2)';
-  ctx.beginPath(); ctx.arc(820, 70, 65, 0, Math.PI*2); ctx.fill();
-
-  // Clouds
-  clouds.forEach(c => drawCloud(c.x, c.y, c.w));
-
-  // Ground
-  const gr = ctx.createLinearGradient(0, GROUND, 0, canvas.height);
-  gr.addColorStop(0, '#5a8a3c'); gr.addColorStop(1, '#3d6b25');
-  ctx.fillStyle = gr; ctx.fillRect(0, GROUND, canvas.width, canvas.height - GROUND);
-
-  // Path (stones)
-  for (let i = 0; i < 8; i++) {
-    ctx.fillStyle = i % 2 ? '#c8a96e' : '#b8996e';
-    ctx.fillRect(180 + i * 60, GROUND, 55, 15);
-  }
-
-  // House
-  drawHouse(60, GROUND - 160);
-
-  // Bathtub
-  drawTub(tub.x, tub.y, btn.pressed);
-
-  // Distance indicator
-  const dist = Math.abs(player.x - (tub.x + tub.w / 2));
-  if (dist < 200 && dist > 70) {
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.font = '14px Segoe UI';
-    ctx.textAlign = 'center';
-    ctx.fillText('⟶ Badewanne', tub.x + tub.w / 2, tub.y - 30);
-  }
-
-  // Player
-  drawPlayer(player.x, player.y, player.dir, player.frame);
-
-  hint.textContent = nearTub()
-    ? '[E] Knopf drücken — starte den Flug!'
-    : '← → Laufen  |  ↑ Springen  |  Zur Badewanne gehen';
-}
-
-function drawFlying() {
-  // Sky becomes more orange/sunset as we fly
-  const t = flyProgress;
-  const r = Math.round(lerp(135, 20, t));
-  const g = Math.round(lerp(206, 10, t));
-  const b = Math.round(lerp(235, 60, t));
-  ctx.fillStyle = `rgb(${r},${g},${b})`;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  // Stars appearing
-  if (t > 0.5) {
-    ctx.fillStyle = `rgba(255,255,255,${(t - 0.5) * 2})`;
-    stars.forEach(s => { ctx.beginPath(); ctx.arc(s.x, s.y + 20, s.r, 0, Math.PI*2); ctx.fill(); });
-  }
-
-  // Horizon glow
-  const glow = ctx.createLinearGradient(0, 300, 0, canvas.height);
-  glow.addColorStop(0, 'rgba(255,150,50,0)');
-  glow.addColorStop(1, 'rgba(255,100,0,0.4)');
-  ctx.fillStyle = glow; ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  // Clouds
-  clouds.forEach(c => drawCloud(c.x, c.y, c.w));
-
-  // Earth below (shrinking)
-  const earthH = Math.round(lerp(canvas.height * 0.45, 30, t));
-  const landGrad = ctx.createLinearGradient(0, canvas.height - earthH, 0, canvas.height);
-  landGrad.addColorStop(0, '#4a8c5c'); landGrad.addColorStop(1, '#2d5a3d');
-  ctx.fillStyle = landGrad;
-  ctx.fillRect(0, canvas.height - earthH, canvas.width, earthH);
-
-  // Indian men on the ground waving goodbye — shrink + fade as you fly away
-  const groundY = canvas.height - earthH;
-  const figScale = earthH / (canvas.height * 0.45);
-  const figAlpha = Math.clamp(1 - t * 3.5, 0, 1); // fade by ~t=0.28
-  if (figAlpha > 0 && figScale > 0.05) {
-    ctx.globalAlpha = figAlpha;
-    const GROUND_FOLK = [
-      { x: 140, dir:  1, k: '#ff9800', tu: '#ffffff' },
-      { x: 300, dir: -1, k: '#e91e63', tu: '#ffd700' },
-      { x: 500, dir:  1, k: '#4caf50', tu: '#ffffff' },
-      { x: 680, dir: -1, k: '#9c27b0', tu: '#ffd700' },
-      { x: 820, dir:  1, k: '#f44336', tu: '#ffffff' },
-    ];
-    GROUND_FOLK.forEach(p => {
-      ctx.save();
-      ctx.translate(p.x, groundY);
-      ctx.scale(figScale, figScale);
-      // draw man with feet at (0,0) in scaled space
-      drawIndianMan(-18, -54, p.dir, p.k, p.tu);
-      // waving arm above head
-      const waveAngle = Math.sin(blinkTimer * 0.006 + p.x) * 0.5 - 0.8;
-      ctx.save();
-      ctx.translate(p.dir > 0 ? 14 : -14, -66);
-      ctx.rotate(waveAngle);
-      ctx.strokeStyle = p.k; ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -18); ctx.stroke();
-      // hand circle
-      ctx.fillStyle = '#c68642';
-      ctx.beginPath(); ctx.arc(0, -22, 5, 0, Math.PI*2); ctx.fill();
-      ctx.restore();
-      ctx.restore();
-    });
-    ctx.globalAlpha = 1;
-  }
-
-  // Birds to dodge
-  birds.forEach(b => drawBird(b.x, b.y, b.flap));
-
-  // Progress bar + remaining time
-  const secsLeft = Math.ceil((FLIGHT_DURATION - flightTime) / 1000);
-  ctx.fillStyle = 'rgba(0,0,0,0.4)';
-  ctx.fillRect(20, 20, 260, 16);
-  ctx.fillStyle = '#ffd700';
-  ctx.fillRect(20, 20, 260 * t, 16);
-  ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 1.5;
-  ctx.strokeRect(20, 20, 260, 16);
-  ctx.fillStyle = 'white'; ctx.font = '13px Segoe UI'; ctx.textAlign = 'left';
-  ctx.fillText(`Flug nach Indien: ${Math.round(t * 100)}%  —  noch ${secsLeft}s`, 24, 53);
-
-  // Tub + player flying (steered by player), with a little bump shake
-  const shakeX = bumpShake > 0 ? (Math.sin(blinkTimer * 0.08) * bumpShake) : 0;
-  const tiltAngle = Math.clamp(flyTubVX * 0.04, -0.35, 0.35);
-  ctx.save();
-  ctx.translate(flyTubX + shakeX, flyTubY);
-  ctx.rotate(tiltAngle);
-  drawTub(-45, -25, true);
-  drawPlayer(-15, -70, 1, Math.floor(blinkTimer / 200) % 2);
-  // Speed lines
-  ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1.5;
-  for (let i = 0; i < 5; i++) {
-    ctx.beginPath();
-    ctx.moveTo(-60 - i * 20, -15 + i * 6);
-    ctx.lineTo(-120 - i * 20, -15 + i * 6);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  hint.textContent = '✈ Steuere die Badewanne: ← → ↑ ↓  |  Weiche den Vögeln aus!';
-}
-
-function drawBird(x, y, flap) {
-  ctx.strokeStyle = '#2c2c2c';
-  ctx.lineWidth = 3;
-  const wing = Math.sin(flap) * 8;
-  ctx.beginPath();
-  ctx.moveTo(x - 14, y + wing);
-  ctx.quadraticCurveTo(x, y - 6, x, y);
-  ctx.quadraticCurveTo(x, y - 6, x + 14, y + wing);
-  ctx.stroke();
-  // little body
-  ctx.fillStyle = '#2c2c2c';
-  ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
-}
-
-function drawIndia() {
-  // Evening sky over India
-  const sky = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  sky.addColorStop(0, '#1a0535'); sky.addColorStop(0.6, '#6b2d8b'); sky.addColorStop(1, '#ff6b35');
-  ctx.fillStyle = sky; ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  // Stars
-  ctx.fillStyle = 'rgba(255,255,255,0.9)';
-  stars.forEach(s => { ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill(); });
-
-  // Taj Mahal silhouette
-  drawTajMahal(450, GROUND - 10);
-
-  // Ground (Indian soil - warm sandy)
-  const gr = ctx.createLinearGradient(0, GROUND, 0, canvas.height);
-  gr.addColorStop(0, '#c8a55a'); gr.addColorStop(1, '#a07840');
-  ctx.fillStyle = gr; ctx.fillRect(0, GROUND, canvas.width, canvas.height - GROUND);
-
-  // Flowers
-  for (let i = 0; i < 6; i++) {
-    drawFlower(100 + i * 130, GROUND - 10, ['#FF6B6B','#FFD700','#FF9FF3','#54A0FF'][i%4]);
-  }
-
-  // Indian people welcoming the player (traditional clothing)
-  drawIndianWoman(120, GROUND - player.h, 1, '#e91e63', '#ffd700');  // pink sari
-  drawIndianMan(200, GROUND - player.h, 1, '#ff9800', '#fff');        // orange kurta + turban
-  drawIndianWoman(620, GROUND - player.h, -1, '#9c27b0', '#ff5722');  // purple sari
-  drawIndianMan(720, GROUND - player.h, -1, '#4caf50', '#fff');       // green kurta + turban
-  drawIndianWoman(800, GROUND - player.h, -1, '#00bcd4', '#ffd700');  // teal sari
-
-  // Landed tub
-  drawTub(380, GROUND - tub.h + 10, true);
-
-  // Player standing next to tub
-  drawPlayer(310, GROUND - player.h, -1, 0);
-
-  // Banner
-  ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  roundRect(ctx, 130, 50, 640, 90, 15);
-  ctx.fill();
-  ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 15;
-  ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 38px Segoe UI';
-  ctx.textAlign = 'center';
-  ctx.fillText('🇮🇳 Willkommen in Indien! 🇮🇳', 450, 98);
-  ctx.restore();
-  ctx.fillStyle = '#ffe0b2';
-  ctx.font = '20px Segoe UI';
-  ctx.textAlign = 'center';
-  ctx.fillText('Die Menschen in indischer Kleidung begrüßen dich! 🛁✨', 450, 165);
-
-  drawBlinkText('[ ENTER ] Nochmal fliegen', 450, 210, '#00d4ff');
-
-  hint.textContent = '[ ENTER ] Nochmal spielen';
-}
-
-// ── DRAW HELPERS ───────────────────────────────────────────
-function drawHouse(x, y) {
-  // Wall
-  ctx.fillStyle = '#f5deb3';
-  ctx.fillRect(x, y + 60, 160, 100);
-  // Roof
-  ctx.fillStyle = '#8b2500';
-  ctx.beginPath(); ctx.moveTo(x - 15, y + 60); ctx.lineTo(x + 80, y); ctx.lineTo(x + 175, y + 60); ctx.closePath(); ctx.fill();
-  // Door
-  ctx.fillStyle = '#5c3317';
-  ctx.fillRect(x + 55, y + 115, 40, 45);
-  ctx.fillStyle = '#ffd700';
-  ctx.beginPath(); ctx.arc(x + 91, y + 137, 4, 0, Math.PI*2); ctx.fill();
   // Window
-  ctx.fillStyle = '#87ceeb';
-  ctx.fillRect(x + 15, y + 80, 35, 30);
-  ctx.strokeStyle = '#5c3317'; ctx.lineWidth = 2;
-  ctx.strokeRect(x + 15, y + 80, 35, 30);
-  ctx.beginPath(); ctx.moveTo(x + 32, y + 80); ctx.lineTo(x + 32, y + 110); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(x + 15, y + 95); ctx.lineTo(x + 50, y + 95); ctx.stroke();
-  // Window 2
-  ctx.fillStyle = '#87ceeb';
-  ctx.fillRect(x + 105, y + 80, 35, 30);
-  ctx.strokeStyle = '#5c3317';
-  ctx.strokeRect(x + 105, y + 80, 35, 30);
-  ctx.beginPath(); ctx.moveTo(x + 122, y + 80); ctx.lineTo(x + 122, y + 110); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(x + 105, y + 95); ctx.lineTo(x + 140, y + 95); ctx.stroke();
+  ctx.fillStyle = '#aee3ff'; ctx.fillRect(560, 50, 260, 150);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 6; ctx.strokeRect(560, 50, 260, 150);
+  ctx.beginPath(); ctx.moveTo(690, 50); ctx.lineTo(690, 200);
+  ctx.moveTo(560, 125); ctx.lineTo(820, 125); ctx.stroke();
+  // sun in window
+  ctx.fillStyle = '#ffd54a'; ctx.beginPath(); ctx.arc(620, 95, 22, 0, Math.PI*2); ctx.fill();
+  // clock
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(490, 70, 24, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(490,70); ctx.lineTo(490,54); ctx.moveTo(490,70); ctx.lineTo(503,70); ctx.stroke();
 }
 
-function drawTub(x, y, buttonPressed) {
-  // Shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  ctx.beginPath(); ctx.ellipse(x + 45, y + 52, 48, 8, 0, 0, Math.PI*2); ctx.fill();
-  // Tub body
-  ctx.fillStyle = '#e8e8f0';
+function drawStudents() {
+  const colors = ['#e74c3c','#3498db','#9b59b6','#16a085','#e67e22','#2ecc71'];
+  const positions = [
+    {x:520,y:430},{x:640,y:430},{x:760,y:430},
+    {x:560,y:500},{x:700,y:500}
+  ];
+  positions.forEach((p,i) => drawStudent(p.x, p.y, colors[i % colors.length], i));
+}
+
+function drawStudent(x, y, color, seed) {
+  // desk
+  ctx.fillStyle = '#caa472'; ctx.fillRect(x-32, y+30, 64, 12);
+  ctx.fillStyle = '#a8855a'; ctx.fillRect(x-28, y+42, 8, 20); ctx.fillRect(x+20, y+42, 8, 20);
+  // body
+  ctx.fillStyle = color; ctx.beginPath();
+  ctx.moveTo(x-16,y+30); ctx.lineTo(x+16,y+30); ctx.lineTo(x+12,y+2); ctx.lineTo(x-12,y+2); ctx.closePath(); ctx.fill();
+  // head
+  ctx.fillStyle = '#f5cba7'; ctx.beginPath(); ctx.arc(x, y-12, 14, 0, Math.PI*2); ctx.fill();
+  // hair (varied)
+  const hairs = ['#3b2a1a','#1a1a1a','#6b4423','#2c2c2c'];
+  ctx.fillStyle = hairs[seed % hairs.length];
+  ctx.beginPath(); ctx.arc(x, y-16, 14, Math.PI, 0); ctx.fill();
+  ctx.fillRect(x-14, y-16, 28, 5);
+  // eyes
+  ctx.fillStyle = '#2c2c2c';
+  ctx.beginPath(); ctx.arc(x-5, y-12, 2, 0, Math.PI*2); ctx.arc(x+5, y-12, 2, 0, Math.PI*2); ctx.fill();
+  // mouth depends on mood during panic ending
+  ctx.strokeStyle = '#a0392b'; ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(x, y + 15); ctx.lineTo(x + 90, y + 15);
-  ctx.lineTo(x + 85, y + 50); ctx.lineTo(x + 5, y + 50);
-  ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = '#b0b0c0'; ctx.lineWidth = 2;
-  ctx.stroke();
-  // Tub rim
-  ctx.fillStyle = '#d0d0e0';
-  ctx.fillRect(x, y + 10, 90, 10);
-  ctx.strokeStyle = '#a0a0c0'; ctx.lineWidth = 1.5;
-  ctx.strokeRect(x, y + 10, 90, 10);
-  // Water
-  ctx.fillStyle = 'rgba(100,180,240,0.6)';
-  ctx.fillRect(x + 5, y + 18, 80, 18);
-  // Faucet
-  ctx.fillStyle = '#c0c0c0';
-  ctx.fillRect(x + 72, y + 5, 8, 16);
-  ctx.fillRect(x + 68, y + 5, 16, 5);
-  // Button
-  ctx.fillStyle = buttonPressed ? '#ff4444' : '#00cc44';
-  ctx.beginPath(); ctx.arc(x + 35, y + 6, 7, 0, Math.PI*2); ctx.fill();
-  ctx.strokeStyle = buttonPressed ? '#cc0000' : '#008800'; ctx.lineWidth = 1.5;
-  ctx.stroke();
-  // Button label
-  ctx.fillStyle = 'white'; ctx.font = 'bold 8px Arial'; ctx.textAlign = 'center';
-  ctx.fillText(buttonPressed ? '!' : 'GO', x + 35, y + 9);
-  // Legs
-  ctx.fillStyle = '#c0c0c0';
-  [[x + 10, y + 50], [x + 30, y + 50], [x + 55, y + 50], [x + 75, y + 50]].forEach(([lx, ly]) => {
-    ctx.fillRect(lx, ly, 6, 12);
-  });
-}
-
-function drawPlayer(x, y, dir, frame) {
-  ctx.save();
-  ctx.translate(x + 18, y);
-  if (dir === -1) ctx.scale(-1, 1);
-
-  // Body (shirt - colorful)
-  ctx.fillStyle = '#3498db';
-  ctx.fillRect(-12, 20, 24, 22);
-
-  // Legs
-  ctx.fillStyle = '#2c3e50';
-  if (frame === 1) {
-    ctx.fillRect(-10, 42, 10, 12); // left leg back
-    ctx.fillRect(0, 42, 10, 8);   // right leg forward
+  if (ending === 'classroom' && endIdx >= 4) {
+    ctx.arc(x, y-2, 5, Math.PI, 0); // shocked frown
   } else {
-    ctx.fillRect(-10, 42, 10, 8);
-    ctx.fillRect(0, 42, 10, 12);
+    ctx.arc(x, y-6, 5, 0.1, Math.PI-0.1); // smile
+  }
+  ctx.stroke();
+}
+
+function drawTeacher(x, y, mood) {
+  // wobble when nervous/panic
+  const wob = (mood === 'nervous' || mood === 'panic') ? Math.sin(t*0.02)*4 : 0;
+  ctx.save();
+  ctx.translate(x + wob, y);
+
+  // legs (crossed/squeezed when needing toilet)
+  ctx.fillStyle = '#34495e';
+  if (mood === 'nervous' || mood === 'panic') {
+    ctx.fillRect(-14, 90, 12, 60); ctx.fillRect(2, 90, 12, 60);
+  } else {
+    ctx.fillRect(-16, 90, 13, 60); ctx.fillRect(3, 90, 13, 60);
+  }
+  // shoes
+  ctx.fillStyle = '#222'; ctx.fillRect(-18, 148, 18, 8); ctx.fillRect(2, 148, 18, 8);
+
+  // body (shirt + tie)
+  ctx.fillStyle = '#ecf0f1';
+  ctx.beginPath();
+  ctx.moveTo(-26, 90); ctx.lineTo(26, 90); ctx.lineTo(20, 18); ctx.lineTo(-20, 18); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#c0392b'; // tie
+  ctx.beginPath(); ctx.moveTo(0,20); ctx.lineTo(-6,30); ctx.lineTo(0,80); ctx.lineTo(6,30); ctx.closePath(); ctx.fill();
+
+  // arms
+  ctx.fillStyle = '#ecf0f1';
+  if (mood === 'panic') {
+    // hands clutching front
+    ctx.fillRect(-30, 30, 10, 40); ctx.fillRect(20, 30, 10, 40);
+  } else if (mood === 'asking') {
+    ctx.fillRect(-34, 26, 10, 36); ctx.fillRect(24, 30, 10, 34);
+  } else {
+    ctx.fillRect(-32, 28, 10, 42); ctx.fillRect(22, 28, 10, 42);
   }
 
-  // Shoes
-  ctx.fillStyle = '#e74c3c';
-  ctx.fillRect(-12, 50, 12, 4);
-  ctx.fillRect(0, 46, 12, 4);
+  // head
+  ctx.fillStyle = '#f5cba7'; ctx.beginPath(); ctx.arc(0, 0, 20, 0, Math.PI*2); ctx.fill();
 
-  // Arms
-  ctx.fillStyle = '#f39c12';
-  ctx.fillRect(-18, 22, 7, 16);
-  ctx.fillRect(11, 22, 7, 16);
+  // BLOND hair
+  ctx.fillStyle = '#f4d03f';
+  ctx.beginPath(); ctx.arc(0, -4, 20, Math.PI, 0); ctx.fill();
+  ctx.fillRect(-20, -4, 40, 7);
+  // little hair tuft
+  ctx.beginPath(); ctx.arc(-8, -18, 6, 0, Math.PI*2); ctx.arc(4, -20, 7, 0, Math.PI*2); ctx.fill();
 
-  // Head
-  ctx.fillStyle = '#f5cba7';
-  ctx.beginPath(); ctx.arc(0, 12, 14, 0, Math.PI*2); ctx.fill();
-
-  // Hair
-  ctx.fillStyle = '#5d4037';
-  ctx.fillRect(-14, 0, 28, 10);
-  ctx.beginPath(); ctx.arc(0, 0, 14, Math.PI, 0); ctx.fill();
-
-  // Eyes
-  ctx.fillStyle = '#2c3e50';
-  ctx.beginPath(); ctx.arc(6, 12, 3, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle = 'white';
-  ctx.beginPath(); ctx.arc(7, 11, 1.2, 0, Math.PI*2); ctx.fill();
-
-  // Smile
-  ctx.strokeStyle = '#e74c3c'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.arc(0, 16, 6, 0.2, Math.PI - 0.2); ctx.stroke();
-
-  ctx.restore();
-}
-
-// Indian woman in a sari with a bindi
-function drawIndianWoman(x, y, dir, sariColor, borderColor) {
-  ctx.save();
-  ctx.translate(x + 18, y);
-  if (dir === -1) ctx.scale(-1, 1);
-
-  // Sari skirt (flared)
-  ctx.fillStyle = sariColor;
-  ctx.beginPath();
-  ctx.moveTo(-12, 22);
-  ctx.lineTo(12, 22);
-  ctx.lineTo(18, 54);
-  ctx.lineTo(-18, 54);
-  ctx.closePath();
-  ctx.fill();
-  // Sari border (decorative bottom)
-  ctx.fillStyle = borderColor;
-  ctx.fillRect(-18, 50, 36, 4);
-  // Sari drape over shoulder
-  ctx.fillStyle = borderColor;
-  ctx.beginPath();
-  ctx.moveTo(-12, 20); ctx.lineTo(2, 20); ctx.lineTo(-4, 44); ctx.lineTo(-14, 44);
-  ctx.closePath(); ctx.fill();
-
-  // Arms
-  ctx.fillStyle = '#c68642';
-  ctx.fillRect(-17, 22, 6, 16);
-  ctx.fillRect(11, 22, 6, 16);
-
-  // Head
-  ctx.fillStyle = '#c68642';
-  ctx.beginPath(); ctx.arc(0, 12, 13, 0, Math.PI*2); ctx.fill();
-
-  // Hair (bun)
-  ctx.fillStyle = '#1a1a1a';
-  ctx.beginPath(); ctx.arc(0, 2, 13, Math.PI, 0); ctx.fill();
-  ctx.fillRect(-13, 2, 26, 6);
-  ctx.beginPath(); ctx.arc(-12, 12, 5, 0, Math.PI*2); ctx.fill(); // side bun
-
-  // Bindi (forehead dot)
-  ctx.fillStyle = '#c0392b';
-  ctx.beginPath(); ctx.arc(0, 8, 2, 0, Math.PI*2); ctx.fill();
-
-  // Eyes
+  // eyes by mood
   ctx.fillStyle = '#2c2c2c';
-  ctx.beginPath(); ctx.arc(5, 13, 2.2, 0, Math.PI*2); ctx.fill();
-  // Smile
-  ctx.strokeStyle = '#a0392b'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.arc(2, 16, 5, 0.2, Math.PI - 0.4); ctx.stroke();
-
-  // Earrings
-  ctx.fillStyle = '#ffd700';
-  ctx.beginPath(); ctx.arc(11, 16, 2, 0, Math.PI*2); ctx.fill();
-
-  ctx.restore();
-}
-
-// Indian man in a kurta with a turban
-function drawIndianMan(x, y, dir, kurtaColor, turbanColor) {
-  ctx.save();
-  ctx.translate(x + 18, y);
-  if (dir === -1) ctx.scale(-1, 1);
-
-  // Legs (dhoti / pants)
-  ctx.fillStyle = '#f5f5dc';
-  ctx.fillRect(-10, 42, 9, 12);
-  ctx.fillRect(1, 42, 9, 12);
-
-  // Kurta (long tunic)
-  ctx.fillStyle = kurtaColor;
-  ctx.beginPath();
-  ctx.moveTo(-12, 20);
-  ctx.lineTo(12, 20);
-  ctx.lineTo(14, 46);
-  ctx.lineTo(-14, 46);
-  ctx.closePath();
-  ctx.fill();
-  // Kurta collar line
-  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(0, 20); ctx.lineTo(0, 34); ctx.stroke();
-
-  // Arms
-  ctx.fillStyle = kurtaColor;
-  ctx.fillRect(-17, 22, 6, 18);
-  ctx.fillRect(11, 22, 6, 18);
-  // Hands
-  ctx.fillStyle = '#a86b3a';
-  ctx.fillRect(-17, 38, 6, 4);
-  ctx.fillRect(11, 38, 6, 4);
-
-  // Head
-  ctx.fillStyle = '#a86b3a';
-  ctx.beginPath(); ctx.arc(0, 12, 13, 0, Math.PI*2); ctx.fill();
-
-  // Turban
-  ctx.fillStyle = turbanColor;
-  ctx.beginPath(); ctx.arc(0, 4, 14, Math.PI, 0); ctx.fill();
-  ctx.fillRect(-14, 0, 28, 6);
-  // Turban wrap lines
-  ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(-13, 2); ctx.quadraticCurveTo(0, -4, 13, 2); ctx.stroke();
-  // Turban jewel
-  ctx.fillStyle = '#c0392b';
-  ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI*2); ctx.fill();
-
-  // Eyes
-  ctx.fillStyle = '#2c2c2c';
-  ctx.beginPath(); ctx.arc(5, 13, 2.2, 0, Math.PI*2); ctx.fill();
-  // Moustache
-  ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(-2, 18); ctx.lineTo(8, 18); ctx.stroke();
-  // Smile
-  ctx.strokeStyle = '#7a2e1e'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.arc(3, 19, 4, 0.2, Math.PI - 0.5); ctx.stroke();
-
-  ctx.restore();
-}
-
-function drawCloud(x, y, w) {
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  const h = w * 0.4;
-  ctx.beginPath();
-  ctx.arc(x + w * 0.3, y + h * 0.6, h * 0.7, 0, Math.PI*2);
-  ctx.arc(x + w * 0.6, y + h * 0.4, h * 0.9, 0, Math.PI*2);
-  ctx.arc(x + w * 0.85, y + h * 0.6, h * 0.65, 0, Math.PI*2);
-  ctx.arc(x + w * 0.15, y + h * 0.65, h * 0.5, 0, Math.PI*2);
-  ctx.fill();
-}
-
-function drawTajMahal(cx, y) {
-  ctx.fillStyle = 'rgba(255,240,220,0.25)';
-  // Main dome
-  ctx.beginPath(); ctx.arc(cx, y - 100, 55, Math.PI, 0); ctx.fill();
-  ctx.fillRect(cx - 55, y - 100, 110, 100);
-  // Dome top
-  ctx.beginPath(); ctx.arc(cx, y - 150, 18, Math.PI, 0); ctx.fill();
-  ctx.fillRect(cx - 5, y - 165, 10, 15);
-  // Side minarets
-  [-200, -120, 120, 200].forEach(off => {
-    ctx.fillRect(cx + off - 10, y - 130, 20, 130);
-    ctx.beginPath(); ctx.arc(cx + off, y - 130, 10, Math.PI, 0); ctx.fill();
-    ctx.fillRect(cx + off - 2, y - 142, 4, 12);
-  });
-  // Arch door
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath(); ctx.arc(cx, y - 40, 22, Math.PI, 0); ctx.fill();
-  ctx.fillRect(cx - 22, y - 40, 44, 40);
-}
-
-function drawFlower(x, y, color) {
-  ctx.fillStyle = color;
-  for (let i = 0; i < 5; i++) {
-    ctx.beginPath();
-    ctx.ellipse(x + Math.cos(i * Math.PI * 2 / 5) * 7, y - 8 + Math.sin(i * Math.PI * 2 / 5) * 7, 5, 5, 0, 0, Math.PI*2);
-    ctx.fill();
+  if (mood === 'panic' || mood === 'nervous') {
+    // wide worried eyes
+    ctx.beginPath(); ctx.arc(-7, 0, 4, 0, Math.PI*2); ctx.arc(8, 0, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-6, -1, 1.5, 0, Math.PI*2); ctx.arc(9, -1, 1.5, 0, Math.PI*2); ctx.fill();
+    // sweat drop
+    ctx.fillStyle = '#5dade2';
+    ctx.beginPath(); ctx.arc(16, -2, 3, 0, Math.PI*2); ctx.fill();
+  } else {
+    ctx.beginPath(); ctx.arc(-7, 0, 2.5, 0, Math.PI*2); ctx.arc(8, 0, 2.5, 0, Math.PI*2); ctx.fill();
   }
-  ctx.fillStyle = '#FFD700';
-  ctx.beginPath(); ctx.arc(x, y - 8, 5, 0, Math.PI*2); ctx.fill();
-  ctx.fillStyle = '#4a7c4e';
-  ctx.fillRect(x - 1, y - 8, 2, 16);
+
+  // eyebrows
+  ctx.strokeStyle = '#c9a227'; ctx.lineWidth = 2;
+  if (mood === 'asking') {
+    ctx.beginPath(); ctx.moveTo(-12,-8); ctx.lineTo(-3,-6); ctx.moveTo(3,-6); ctx.lineTo(12,-8); ctx.stroke();
+  }
+
+  // mouth by mood
+  ctx.strokeStyle = '#a0392b'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (mood === 'happy' || mood === 'relief') ctx.arc(0, 6, 8, 0.1, Math.PI-0.1);
+  else if (mood === 'asking') ctx.arc(0, 10, 4, 0, Math.PI*2);
+  else if (mood === 'nervous') { ctx.moveTo(-7, 9); ctx.lineTo(7, 11); }
+  else if (mood === 'panic') ctx.arc(0, 11, 6, Math.PI, 0); // open worried
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawPuddle(x, y) {
+  ctx.fillStyle = 'rgba(120,190,240,0.55)';
+  ctx.beginPath();
+  ctx.ellipse(x, y, 50, 14, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(120,190,240,0.35)';
+  ctx.beginPath(); ctx.ellipse(x+30, y+6, 20, 7, 0, 0, Math.PI*2); ctx.fill();
+}
+
+// Cartoon poop pile (three stacked swirls)
+function drawPoop(x, y) {
+  ctx.fillStyle = '#7a4a1e';
+  // bottom layer
+  ctx.beginPath(); ctx.ellipse(x, y, 26, 11, 0, 0, Math.PI*2); ctx.fill();
+  // middle blob
+  ctx.fillStyle = '#8a5524';
+  ctx.beginPath(); ctx.ellipse(x, y-9, 18, 10, 0, 0, Math.PI*2); ctx.fill();
+  // top blob
+  ctx.fillStyle = '#965e2a';
+  ctx.beginPath(); ctx.ellipse(x, y-18, 11, 8, 0, 0, Math.PI*2); ctx.fill();
+  // tip
+  ctx.beginPath(); ctx.moveTo(x-5, y-22); ctx.quadraticCurveTo(x, y-34, x+5, y-22); ctx.fill();
+  // highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath(); ctx.ellipse(x-6, y-12, 4, 6, -0.4, 0, Math.PI*2); ctx.fill();
+  // cartoon eyes on the poop :)
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x-5, y-18, 3.2, 0, Math.PI*2); ctx.arc(x+5, y-18, 3.2, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(x-5, y-18, 1.5, 0, Math.PI*2); ctx.arc(x+5, y-18, 1.5, 0, Math.PI*2); ctx.fill();
+}
+
+function drawDialog() {
+  let who = '', text = '';
+  if (phase === 'intro' || phase === 'choice') {
+    const c = current(); who = c.who; text = c.text;
+    if (c.choice) { who = 'Lehrer Herr Blondi'; text = 'Also... darf ich jetzt aufs Klo? 🥺'; }
+  } else if (phase === 'ending') {
+    const c = endLines[endIdx]; who = c.who; text = c.text;
+  }
+  if (!text) return;
+
+  // box
+  ctx.fillStyle = 'rgba(0,0,0,0.82)';
+  roundRect(ctx, 30, 360, 540, 150, 14); ctx.fill();
+  ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 2;
+  roundRect(ctx, 30, 360, 540, 150, 14); ctx.stroke();
+
+  if (who) {
+    ctx.fillStyle = who.includes('Lehrer') ? '#f4d03f' : '#5dade2';
+    ctx.font = 'bold 20px Segoe UI'; ctx.textAlign = 'left';
+    ctx.fillText(who, 52, 392);
+  }
+  ctx.fillStyle = '#fff'; ctx.font = '21px Segoe UI';
+  wrapText(text, 52, 426, 500, 28);
+
+  // blinking continue arrow (not during choice)
+  if (phase !== 'choice' && Math.floor(t/400)%2===0) {
+    ctx.fillStyle = '#ffd700'; ctx.font = '20px Segoe UI';
+    ctx.fillText('▼', 540, 498);
+  }
+}
+
+function wrapText(text, x, y, maxW, lh) {
+  const words = text.split(' '); let line = ''; let yy = y;
+  for (const w of words) {
+    const test = line + w + ' ';
+    if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, x, yy); line = w + ' '; yy += lh; }
+    else line = test;
+  }
+  ctx.fillText(line, x, yy);
 }
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.lineTo(x + w - r, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-  ctx.lineTo(x + w, y + h - r);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-  ctx.lineTo(x + r, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-  ctx.lineTo(x, y + r);
-  ctx.quadraticCurveTo(x, y, x + r, y);
-  ctx.closePath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
 }
 
-function lerp(a, b, t) { return a + (b - a) * Math.clamp(t, 0, 1); }
-Math.clamp = (v, min, max) => Math.min(Math.max(v, min), max);
-
-// ── GAME LOOP ─────────────────────────────────────────────
-let last = 0;
-function loop(ts) {
-  const dt = Math.min(ts - last, 50);
-  last = ts;
-  blinkTimer += dt;
-  update(dt);
-  draw();
-  requestAnimationFrame(loop);
-}
+// ── LOOP ───────────────────────────────────────────────────
+function loop(ts) { t = ts; draw(); requestAnimationFrame(loop); }
 requestAnimationFrame(loop);
 </script>
 </body>
